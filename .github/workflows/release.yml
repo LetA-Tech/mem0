@@ -1,0 +1,137 @@
+name: Build and Publish LetA Mem0 Server Image
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: registry.digitalocean.com
+  REGISTRY_NAMESPACE: leta-container-registry
+  IMAGE_NAME: mem0-server-qdrant
+
+jobs:
+  validate:
+    name: Validate release artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate semantic release tag
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "release tags must match vX.Y.Z" >&2; exit 1 ;;
+          esac
+          printf '%s' "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+      - name: Validate tag is on origin/main
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=1
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies from local source
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          grep -vE '^mem0ai([<>= ].*)?$' server/requirements.txt > /tmp/server-runtime-requirements.txt
+          python -m pip install -r /tmp/server-runtime-requirements.txt
+          python -m pip install -e '.[test,dev]'
+
+      - name: Run lint
+        run: make lint
+
+      - name: Run tests
+        run: make test
+
+      - name: Run deploy checks
+        run: make deploy-check
+
+  publish:
+    name: Build and push DOCR image
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate registry secret
+        run: |
+          set -euo pipefail
+          test -n "${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}" || {
+            echo "Missing DIGITALOCEAN_ACCESS_TOKEN" >&2
+            exit 1
+          }
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Login to DigitalOcean Container Registry
+        run: doctl registry login --expiry-seconds 1200 --access-token "${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image refs
+        id: refs
+        run: |
+          set -euo pipefail
+          base="${REGISTRY}/${REGISTRY_NAMESPACE}/${IMAGE_NAME}"
+          echo "image_version=${base}:${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_sha=${base}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          provenance: false
+          build-args: |
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_REVISION=${{ github.sha }}
+            IMAGE_VERSION=${{ github.ref_name }}
+          tags: |
+            ${{ steps.refs.outputs.image_version }}
+            ${{ steps.refs.outputs.image_sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.title=LetA Mem0 Server Qdrant
+          cache-from: type=gha,scope=mem0-server-qdrant
+          cache-to: type=gha,mode=max,scope=mem0-server-qdrant
+
+      - name: Publish summary
+        run: |
+          {
+            echo "### Images pushed"
+            echo ""
+            echo "- \`${{ steps.refs.outputs.image_version }}\`"
+            echo "- \`${{ steps.refs.outputs.image_sha }}\`"
+            echo ""
+            echo "CI stops here. Production deployment remains manual, host-side, and pull-based."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logout from DOCR
+        if: always()
+        run: docker logout "${REGISTRY}" || true

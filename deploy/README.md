@@ -17,7 +17,7 @@ LetA Mem0 fork (this repo)
 │   ├── deploy.sh          # pull + up + smoke-test, against local images
 │   └── README.md          # this file
 └── .github/workflows/
-    └── leta-mem0-build-and-push.yml   # CI: tag leta-v* -> DOCR
+    └── release.yml                    # CI: tag vX.Y.Z -> DOCR
 
 mcfo-finsys/agent-memory-server/        # production deploy artifact, pulls from DOCR
 ├── compose/docker-compose.yml          # Mem0 + Qdrant on Server B
@@ -68,17 +68,15 @@ docker compose down -v
 Local dev loop satisfied → cut a LetA tag → CI publishes to DOCR:
 
 ```bash
-# Branch leta/v2.0.2-qdrant holds the patch
-git tag leta-v2.0.2-q1   # see LETA_PATCH.md for tag naming
-git push origin leta-v2.0.2-q1
+make release-all VERSION=X.Y.Z
 # GH Actions builds and pushes:
-#   registry.digitalocean.com/leta-container-registry/mcfo-mem0:leta-v2.0.2-q1
+#   registry.digitalocean.com/leta-container-registry/mem0-server-qdrant:vX.Y.Z
 ```
 
 Then in `mcfo-finsys/agent-memory-server/.env`:
 
 ```env
-AGENT_MEMORY_MEM0_IMAGE=registry.digitalocean.com/leta-container-registry/mcfo-mem0:leta-v2.0.2-q1
+AGENT_MEMORY_MEM0_IMAGE=registry.digitalocean.com/leta-container-registry/mem0-server-qdrant:vX.Y.Z
 ```
 
 …and run `mcfo-finsys/agent-memory-server/scripts/deploy.sh` on `LETA-SER-MEM0`.

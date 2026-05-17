@@ -1,7 +1,8 @@
 # LetA Patch — Mem0 Server v2.0.2
 
-LetA-owned, minimal patch on top of upstream `mem0ai/mem0` at tag `v2.0.2`.
-Branch: `leta/v2.0.2-qdrant`.
+LetA-owned, minimal patch on top of upstream `mem0ai/mem0` at tag `v2.0.2`
+(`9043fbf61e60c9e2f2e60ddddc849adebc273608`). Release artifacts are cut from
+`main` with LetA semver tags (`vX.Y.Z`).
 
 This document is the source of truth for what LetA changed and why.
 Anyone reviewing this fork starts here before reading code.
@@ -89,9 +90,10 @@ Both paths are added to `SKIPPED_REQUEST_LOG_PATHS` so they do not spam
 - All upstream routes (`/configure`, `/memories`, `/search`, `/reset`, etc.)
   retained, with their existing `verify_auth` dependencies.
 - Pgvector default path retained. Patch is purely additive.
-- No upstream dependencies removed. The fork installs the same packages.
-- No upstream test changes. New endpoints have new tests added under
-  `server/tests/leta/` (TBD before first production deploy).
+- No upstream dependencies removed from source. The LetA production image does
+  not install floating `mem0ai>=...` from PyPI; it installs the local patched
+  package in this repo.
+- Focused LetA regression tests live under `tests/server/test_leta_qdrant_config.py`.
 
 ---
 
@@ -106,24 +108,26 @@ git cherry-pick <patch-commit-on-leta/v2.0.2-qdrant>
 # Resolve any conflicts on server/main.py
 python -c "import ast; ast.parse(open('server/main.py').read())"
 git push origin leta/<NEW-TAG>-qdrant
-# Tag a LetA-owned release for the deploy pipeline:
-git tag leta-v<NEW-TAG>-q1
-git push origin leta-v<NEW-TAG>-q1
+# After review, release with the normal LetA artifact flow:
+make release-all VERSION=X.Y.Z
 ```
 
-Tag naming: `leta-v<upstream-version>-q<patch-revision>`. Example:
-`leta-v2.0.2-q1` = upstream 2.0.2 + LetA patch revision 1.
+Release tag naming: `vX.Y.Z`, created only by `make release-all VERSION=X.Y.Z`.
+The Makefile validates branch, clean tree, `origin/main` sync, deploy checks,
+and tag uniqueness before pushing `main` and the annotated release tag.
 
 ---
 
 ## Container build
 
-Builds from upstream `server/Dockerfile` unchanged. CI workflow (see
-`.github/workflows/build-and-push.yml`, added in this same patch branch) builds
-on `leta-v*` tags and pushes to LetA's DigitalOcean Container Registry:
+Builds from the root `Dockerfile`, which installs the local patched Mem0 source
+and the server runtime without installing floating `mem0ai>=...` from PyPI.
+CI workflow `.github/workflows/release.yml` builds on semantic `vX.Y.Z` tags and
+pushes to LetA's DigitalOcean Container Registry:
 
 ```text
-registry.digitalocean.com/leta-container-registry/mcfo-mem0:leta-v2.0.2-q1
+registry.digitalocean.com/leta-container-registry/mem0-server-qdrant:vX.Y.Z
+registry.digitalocean.com/leta-container-registry/mem0-server-qdrant:<git-sha>
 ```
 
 The `mcfo-finsys/agent-memory-server` deploy artifact references this image
@@ -133,18 +137,18 @@ via `AGENT_MEMORY_MEM0_IMAGE`.
 
 ## Verification before deploy
 
-Run before pushing a new `leta-v*` tag:
+Run before pushing a new release tag:
 
 ```bash
-# Syntax + config dry run
-python -c "import ast; ast.parse(open('server/main.py').read())"
-
-# Local boot with Qdrant
-docker compose -f server/docker-compose.yaml up -d   # upstream compose still
-                                                      # builds pgvector path
-# OR use mcfo-finsys/agent-memory-server compose with this image tag set in
-# AGENT_MEMORY_MEM0_IMAGE for the Qdrant path.
+make lint
+make test
+make deploy-check
+make docker-build VERSION=0.0.0-audit
 ```
+
+`make release-all VERSION=X.Y.Z` runs `make deploy-check` again, creates an
+annotated `vX.Y.Z` tag, pushes `main` and the tag, and stops. GitHub Actions
+builds and pushes the immutable image only. It does not deploy to servers.
 
 ---
 

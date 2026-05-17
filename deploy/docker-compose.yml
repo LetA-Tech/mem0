@@ -1,7 +1,7 @@
 # ============================================================================
 # LetA Mem0 — Developer Dev Loop Compose (LOCAL ONLY)
 # ============================================================================
-# Brings up Mem0 (built from ../server/Dockerfile), Qdrant, and a tiny
+# Brings up Mem0 (built from ../Dockerfile), Qdrant, and a tiny
 # Postgres for Mem0's own app DB (users, request_logs, api keys).
 #
 # Production lives in mcfo-finsys/agent-memory-server/. Do not point this
@@ -13,8 +13,12 @@ services:
   mem0:
     build:
       context: ..
-      dockerfile: server/Dockerfile
-    image: leta/mcfo-mem0:dev
+      dockerfile: Dockerfile
+      args:
+        IMAGE_SOURCE: https://github.com/letainc/mem0
+        IMAGE_REVISION: dev-local
+        IMAGE_VERSION: dev-local
+    image: leta/mem0-server-qdrant:dev
     container_name: leta-mem0-dev
     restart: unless-stopped
     # Bind only to localhost on the developer machine. No VPC, no public.
@@ -25,9 +29,9 @@ services:
     environment:
       # Override Postgres host/user with the local container names
       - POSTGRES_HOST=appdb
-      - POSTGRES_USER=${POSTGRES_USER:-mem0}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mem0-local-dev}
-      - POSTGRES_DB=${POSTGRES_DB:-mem0_app}
+      - POSTGRES_USER=${POSTGRES_USER:?set POSTGRES_USER in deploy/.env}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      - POSTGRES_DB=${POSTGRES_DB:?set POSTGRES_DB in deploy/.env}
     depends_on:
       qdrant:
         condition: service_healthy
@@ -74,7 +78,7 @@ services:
     # Mem0's own app DB (users, api_keys, request_logs). Not the vector store.
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-mem0}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mem0-local-dev}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
       - POSTGRES_DB=${POSTGRES_DB:-mem0_app}
     volumes:
       - appdb_dev:/var/lib/postgresql/data
