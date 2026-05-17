@@ -62,6 +62,30 @@ through OpenRouter via the OpenAI-compatible endpoint. The patch forwards
 `OPENAI_BASE_URL` into both the LLM config and the embedder config when set.
 Without `OPENAI_BASE_URL`, behaviour is identical to upstream.
 
+### 4. `/search` top-level scope → `filters` wrapper
+
+Upstream Mem0 SDK v2 made `Memory.search()` reject top-level entity kwargs
+(`user_id`, `agent_id`, `run_id`) and require `filters={"user_id": "..."}`.
+The server's `SearchRequest` schema still exposes those fields at the top
+level for ergonomic clients (curl, httpx, plain REST consumers). Without
+a wrapper, every `/search` call returns 502 with `ValueError: Top-level
+entity parameters ... are not supported`.
+
+The patch in `server/main.py search_memories()`:
+
+- Accepts both shapes from the client: top-level `user_id` etc. AND
+  explicit `filters` object.
+- Merges top-level scope fields into `filters` before calling the SDK.
+- Existing client-supplied `filters` wins on key collision.
+
+Identical client payloads work both before and after this patch:
+
+```json
+{"query": "x", "user_id": "service:mellions"}                              // legacy
+{"query": "x", "filters": {"user_id": "service:mellions"}}                 // current
+{"query": "x", "user_id": "service:mellions", "agent_id": "mellions"}      // mixed
+```
+
 ### 3. `/healthz` and `/readyz` endpoints
 
 Upstream's FastAPI app exposes no `/health` route. The Makefile probes

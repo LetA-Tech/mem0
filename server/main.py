@@ -485,10 +485,25 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 
 @app.post("/search", summary="Search memories")
 def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
-    """Search for memories based on a query."""
+    """Search for memories based on a query.
+
+    [LETA PATCH §4] Mem0 SDK v2 rejects top-level entity kwargs in
+    `Memory.search()` and demands `filters={"user_id": "...", ...}`. The
+    server's request schema still exposes top-level user_id/agent_id/run_id
+    for ergonomic clients. We merge them into `filters` before calling the
+    SDK so both shapes work and existing callers don't break.
+    """
     try:
-        params = {k: v for k, v in search_req.model_dump().items() if v is not None and k != "query"}
-        return get_memory_instance().search(query=search_req.query, **params)
+        body = search_req.model_dump(exclude_none=True)
+        body.pop("query", None)
+        filters = body.pop("filters", None) or {}
+        for k in ("user_id", "agent_id", "run_id"):
+            v = body.pop(k, None)
+            if v is not None and k not in filters:
+                filters[k] = v
+        if filters:
+            body["filters"] = filters
+        return get_memory_instance().search(query=search_req.query, **body)
     except Exception:
         raise upstream_error()
 
