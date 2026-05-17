@@ -49,7 +49,7 @@ SENSITIVE_CONFIG_KEYS = {
     "secret",
     "token",
 }
-SKIPPED_REQUEST_LOG_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json"}
+SKIPPED_REQUEST_LOG_PATHS = {"/api/health", "/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"}
 SKIPPED_REQUEST_LOG_PREFIXES = ("/requests",)
 
 BUNDLED_LLM_PROVIDERS = ("openai", "anthropic", "gemini")
@@ -106,13 +106,53 @@ POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL")
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
 DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "gpt-4.1-nano-2025-04-14")
 DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "text-embedding-3-small")
 
-DEFAULT_CONFIG = {
-    "version": "v1.1",
-    "vector_store": {
+# [LETA PATCH] Vector store selection via env. Upstream hardcodes pgvector.
+# Set MEM0_VECTOR_STORE=qdrant to point at a Qdrant server (LetA agent-memory deploy).
+# Upstream pgvector path remains the default for backwards-compat with mem0ai/mem0.
+MEM0_VECTOR_STORE = os.environ.get("MEM0_VECTOR_STORE", "pgvector").lower()
+
+QDRANT_URL = os.environ.get("QDRANT_URL")
+QDRANT_HOST = os.environ.get("QDRANT_HOST")
+QDRANT_PORT = os.environ.get("QDRANT_PORT")
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
+QDRANT_COLLECTION_NAME = os.environ.get("QDRANT_COLLECTION_NAME", "memories")
+QDRANT_EMBEDDING_MODEL_DIMS = os.environ.get("QDRANT_EMBEDDING_MODEL_DIMS")
+QDRANT_ON_DISK = os.environ.get("QDRANT_ON_DISK", "false").lower() in ("1", "true", "yes")
+
+
+def _build_qdrant_vector_store_config() -> Dict[str, Any]:
+    """[LETA PATCH] Build the Mem0 vector_store dict for Qdrant from env vars.
+
+    Supports either QDRANT_URL (preferred, e.g. http://qdrant:6333) or
+    explicit QDRANT_HOST + QDRANT_PORT. QDRANT_COLLECTION_NAME maps to the
+    LetA `{class}_{env}_{owner}_{purpose}_{embedding-suffix}` convention.
+    """
+    config: Dict[str, Any] = {"collection_name": QDRANT_COLLECTION_NAME}
+    if QDRANT_URL:
+        config["url"] = QDRANT_URL
+    else:
+        if not (QDRANT_HOST and QDRANT_PORT):
+            raise RuntimeError(
+                "MEM0_VECTOR_STORE=qdrant requires QDRANT_URL or QDRANT_HOST + QDRANT_PORT."
+            )
+        config["host"] = QDRANT_HOST
+        config["port"] = int(QDRANT_PORT)
+    if QDRANT_API_KEY:
+        config["api_key"] = QDRANT_API_KEY
+    if QDRANT_EMBEDDING_MODEL_DIMS:
+        config["embedding_model_dims"] = int(QDRANT_EMBEDDING_MODEL_DIMS)
+    config["on_disk"] = QDRANT_ON_DISK
+    return {"provider": "qdrant", "config": config}
+
+
+def _build_pgvector_vector_store_config() -> Dict[str, Any]:
+    """Upstream pgvector vector_store dict, factored out so the selector is clean."""
+    return {
         "provider": "pgvector",
         "config": {
             "host": POSTGRES_HOST,
@@ -122,12 +162,42 @@ DEFAULT_CONFIG = {
             "password": POSTGRES_PASSWORD,
             "collection_name": POSTGRES_COLLECTION_NAME,
         },
-    },
-    "llm": {
-        "provider": "openai",
-        "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": DEFAULT_LLM_MODEL},
-    },
-    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}},
+    }
+
+
+# [LETA PATCH] Pick vector store from env. Default = pgvector (upstream behaviour).
+if MEM0_VECTOR_STORE == "qdrant":
+    _VECTOR_STORE_CONFIG = _build_qdrant_vector_store_config()
+elif MEM0_VECTOR_STORE == "pgvector":
+    _VECTOR_STORE_CONFIG = _build_pgvector_vector_store_config()
+else:
+    raise RuntimeError(
+        f"Unsupported MEM0_VECTOR_STORE='{MEM0_VECTOR_STORE}'. Supported: pgvector, qdrant."
+    )
+
+logging.info("vector_store provider selected: %s", _VECTOR_STORE_CONFIG["provider"])
+
+
+# [LETA PATCH] OpenAI client config supports OPENAI_BASE_URL for OpenRouter routing.
+_LLM_CONFIG: Dict[str, Any] = {
+    "api_key": OPENAI_API_KEY,
+    "temperature": 0.2,
+    "model": DEFAULT_LLM_MODEL,
+}
+_EMBEDDER_CONFIG: Dict[str, Any] = {
+    "api_key": OPENAI_API_KEY,
+    "model": DEFAULT_EMBEDDER_MODEL,
+}
+if OPENAI_BASE_URL:
+    _LLM_CONFIG["openai_base_url"] = OPENAI_BASE_URL
+    _EMBEDDER_CONFIG["openai_base_url"] = OPENAI_BASE_URL
+
+
+DEFAULT_CONFIG = {
+    "version": "v1.1",
+    "vector_store": _VECTOR_STORE_CONFIG,
+    "llm": {"provider": "openai", "config": _LLM_CONFIG},
+    "embedder": {"provider": "openai", "config": _EMBEDDER_CONFIG},
     "history_db_path": HISTORY_DB_PATH,
 }
 
@@ -480,6 +550,31 @@ def reset_memory(_auth=Depends(verify_auth)):
         return {"message": "All memories reset"}
     except Exception:
         raise upstream_error()
+
+
+# [LETA PATCH] Unauthenticated liveness endpoint for Docker / UFW-fronted deploys.
+# Upstream's API has no /health route; Makefile uses /auth/setup-status which
+# requires the dashboard / app DB to be reachable. /healthz is intentionally
+# narrower: it confirms the FastAPI process is up. Vector store + DB liveness
+# is reported by a separate readyz endpoint that the LetA deploy artifact
+# probes once the stack is fully wired.
+@app.get("/healthz", summary="Liveness probe (unauthenticated)", include_in_schema=False)
+def healthz():
+    """Return 200 if the FastAPI process is responsive. No backend checks."""
+    return {"status": "ok"}
+
+
+# [LETA PATCH] Readiness probe — checks app DB connectivity. Still no auth.
+# Memory I/O isn't probed here to avoid burning vector ops on every Docker
+# healthcheck; that's covered by the deploy artifact's smoke test.
+@app.get("/readyz", summary="Readiness probe (unauthenticated)", include_in_schema=False)
+def readyz():
+    try:
+        with SessionLocal() as session:
+            session.execute(select(func.count(User.id)))
+        return {"status": "ready"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "not_ready"})
 
 
 @app.get("/", summary="Redirect to the OpenAPI documentation", include_in_schema=False)

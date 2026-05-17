@@ -1,0 +1,110 @@
+# ============================================================================
+# LetA Mem0 Server — Build & Push to DigitalOcean Container Registry
+# ============================================================================
+# Triggers on LetA-owned tag pattern: `leta-v*` (e.g. leta-v2.0.2-q1).
+# Builds the Mem0 server image from server/Dockerfile (upstream, unmodified)
+# at the tagged commit and pushes to DOCR.
+#
+# Does NOT touch upstream `cd.yml` or any upstream workflow. LetA workflow lives
+# alongside upstream workflows but only fires on the `leta-v*` tag namespace.
+#
+# Companion doc: LETA_PATCH.md (root)
+# ============================================================================
+
+name: leta-mem0-build-and-push
+
+on:
+  push:
+    tags:
+      - 'leta-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & push mcfo-mem0 image
+    runs-on: ubuntu-latest
+
+    env:
+      DO_REGISTRY: registry.digitalocean.com
+      DO_REGISTRY_NAMESPACE: leta-container-registry
+      IMAGE_NAME: mcfo-mem0
+      DOCKER_BUILDKIT: "1"
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Confirm tag namespace
+        # Safety net — refuse to push if a non-leta tag somehow triggered this
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME:-}"
+          case "$tag" in
+            leta-v*) echo "ok: $tag" ;;
+            *) echo "refusing to build on non-leta tag: $tag" >&2; exit 1 ;;
+          esac
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Verify DOCR access
+        run: |
+          set -euo pipefail
+          doctl account get >/dev/null
+          doctl registry get >/dev/null
+          doctl registry login --expiry-seconds 1200
+
+      - name: Compute image refs
+        id: refs
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          base="${DO_REGISTRY}/${DO_REGISTRY_NAMESPACE}/${IMAGE_NAME}"
+          echo "image_tag=${base}:${tag}" >> "$GITHUB_OUTPUT"
+          echo "image_sha=${base}:sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push image (server/Dockerfile, no upstream modification)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.refs.outputs.image_tag }}
+            ${{ steps.refs.outputs.image_sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            leta.patch=v2.0.2-qdrant
+          cache-from: type=gha,scope=leta-mem0
+          cache-to: type=gha,mode=max,scope=leta-mem0
+
+      - name: Summary
+        run: |
+          {
+            echo "### Pushed images"
+            echo ""
+            echo "- \`${{ steps.refs.outputs.image_tag }}\`"
+            echo "- \`${{ steps.refs.outputs.image_sha }}\`"
+            echo ""
+            echo "Set in mcfo-finsys/agent-memory-server/.env:"
+            echo ""
+            echo "\`\`\`env"
+            echo "AGENT_MEMORY_MEM0_IMAGE=${{ steps.refs.outputs.image_tag }}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logout from DOCR
+        if: always()
+        run: docker logout "${DO_REGISTRY}" || true

@@ -1,0 +1,101 @@
+# ============================================================================
+# LetA Mem0 — Developer Dev Loop Compose (LOCAL ONLY)
+# ============================================================================
+# Brings up Mem0 (built from ../server/Dockerfile), Qdrant, and a tiny
+# Postgres for Mem0's own app DB (users, request_logs, api keys).
+#
+# Production lives in mcfo-finsys/agent-memory-server/. Do not point this
+# compose at a production host.
+# ============================================================================
+
+services:
+
+  mem0:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: leta/mcfo-mem0:dev
+    container_name: leta-mem0-dev
+    restart: unless-stopped
+    # Bind only to localhost on the developer machine. No VPC, no public.
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override Postgres host/user with the local container names
+      - POSTGRES_HOST=appdb
+      - POSTGRES_USER=${POSTGRES_USER:-mem0}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mem0-local-dev}
+      - POSTGRES_DB=${POSTGRES_DB:-mem0_app}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      appdb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8000/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - leta-mem0-dev-net
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.0-unprivileged
+    container_name: leta-qdrant-dev
+    restart: unless-stopped
+    # NO host ports. Reached only by the mem0 container on the internal network.
+    environment:
+      - QDRANT__SERVICE__HOST=0.0.0.0
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__TELEMETRY_DISABLED=true
+    volumes:
+      - qdrant_dev:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - leta-mem0-dev-net
+
+  appdb:
+    image: postgres:16-alpine
+    container_name: leta-mem0-appdb-dev
+    restart: unless-stopped
+    # Mem0's own app DB (users, api_keys, request_logs). Not the vector store.
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-mem0}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mem0-local-dev}
+      - POSTGRES_DB=${POSTGRES_DB:-mem0_app}
+    volumes:
+      - appdb_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - leta-mem0-dev-net
+
+volumes:
+  qdrant_dev:
+    name: leta_mem0_qdrant_dev
+  appdb_dev:
+    name: leta_mem0_appdb_dev
+
+networks:
+  leta-mem0-dev-net:
+    name: leta_mem0_dev_net
+    driver: bridge
